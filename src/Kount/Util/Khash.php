@@ -1,6 +1,6 @@
 <?php
 
-require __DIR__ . "/../resources/base85.class.php";
+require_once __DIR__ . "/../resources/base85.class.php";
 
 if (!defined('ENCRYPTED_CONFIG_KEY')) {
 
