@@ -23,7 +23,10 @@
     "ext-xml": "*",
     "psr/http-client": "^1.0",
     "psr/http-factory": "^1.1",
-    "psr/http-message": "^2.0"
+    "psr/http-message": "^2.0",
+    "psr/cache": "^3.0",
+    "psr/simple-cache": "^3.0",
+    "psr/log": "^3.0"
   },
   "require-dev": {
     "phpunit/phpunit": "^11.5.12",
