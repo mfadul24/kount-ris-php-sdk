@@ -1,0 +1,13 @@
+<phpunit bootstrap="tests/bootstrap.php"
+         colors="true"
+         cacheResult="false"
+         cacheDirectory="build/cache"
+>
+
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/Kount/Unit</directory>
+        </testsuite>
+    </testsuites>
+
+</phpunit>

@@ -212,4 +212,16 @@ class Kount_Ris_ArraySettings implements Kount_Ris_Settings
         return array_key_exists('PF_API_KEY', $this->settings) ? $this->settings['PF_API_KEY'] :
             Kount_Util_ConfigFileReader::instance()->getConfigSetting('PF_API_KEY');
     }
+
+    /**
+     * Optional flag controlling whether the full request and response payloads
+     * are logged. Returns null when the PAYLOAD_LOGGING key is not present so
+     * existing settings remain unaffected.
+     * @return mixed PAYLOAD_LOGGING value, or null when not set.
+     */
+    public function getPayloadLogging()
+    {
+        return array_key_exists('PAYLOAD_LOGGING', $this->settings) ?
+            $this->settings['PAYLOAD_LOGGING'] : null;
+    }
 } //end Kount_Ris_ArraySettings

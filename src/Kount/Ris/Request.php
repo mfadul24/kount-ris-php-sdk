@@ -231,6 +231,13 @@ abstract class Kount_Ris_Request
     protected $accessToken = array();
 
     /**
+     * Whether the full request and response payloads should be logged at
+     * info level. The payment token (PTOK) is always masked before logging.
+     * @var boolean
+     */
+    private $logPayloads = false;
+
+    /**
      * Constructor.
      *
      * If no explicit configuration settings are provided we will attempt to
@@ -296,6 +303,16 @@ abstract class Kount_Ris_Request
 
         // KHASH payment encoding is enabled by default.
         $this->setKhashPaymentEncoding(true);
+
+        // Honor an optional PAYLOAD_LOGGING settings flag. Only read it when the
+        // key is present so existing settings are not affected and the feature
+        // stays backward-compatible.
+        if (method_exists($this->settings, 'getPayloadLogging')) {
+            $payloadLogging = $this->settings->getPayloadLogging();
+            if ($payloadLogging !== null && filter_var($payloadLogging, FILTER_VALIDATE_BOOLEAN)) {
+                $this->logPayloads = true;
+            }
+        }
     }
 
     /**
@@ -305,6 +322,22 @@ abstract class Kount_Ris_Request
     public function getErrorMessage()
     {
         return $this->errorMessage;
+    }
+
+    /**
+     * Enable or disable logging of the full request and response payloads.
+     *
+     * When enabled, the request payload is logged at info level after the POST
+     * body is built and the raw response is logged at info level once received.
+     * The payment token (PTOK) is always masked before logging.
+     *
+     * @param boolean $enabled TRUE to enable payload logging.
+     * @return Kount_Ris_Request
+     */
+    public function setPayloadLogging(bool $enabled): Kount_Ris_Request
+    {
+        $this->logPayloads = $enabled;
+        return $this;
     }
 
     /**
@@ -379,7 +412,13 @@ abstract class Kount_Ris_Request
                 'payment token hidden' : $value;
             $this->logger->debug(__METHOD__ . " [{$key}]={$value}");
         }
-        curl_setopt($ch, CURLOPT_POSTFIELDS, implode('&', $payload));
+        $postBody = implode('&', $payload);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $postBody);
+
+        if ($this->logPayloads) {
+            $this->logger->info(__METHOD__ . " Request payload: " .
+                $this->maskPayloadForLogging($this->data));
+        }
 
         $this->logger->debug(__METHOD__ . " Posting to RIS");
         // Call the RIS server and get the response
@@ -398,6 +437,10 @@ abstract class Kount_Ris_Request
             $this->logger->debug("{$risLogMessage}");
         }
         $this->logger->debug(__METHOD__ . " Raw RIS response:\n {$output}");
+
+        if ($this->logPayloads) {
+            $this->logger->info(__METHOD__ . " Response payload: {$output}");
+        }
 
         if ($curlErrNo || $httpCode >= 400) {
             $errorMessage = 'An error occurred posting to RIS.';
@@ -998,6 +1041,31 @@ abstract class Kount_Ris_Request
         $result .= substr($token, -4);
 
         return $result;
+    }
+
+    /**
+     * Mask sensitive values in a payload array and format it as a readable
+     * string for logging.
+     *
+     * The payment token (PTOK) is replaced with '[HIDDEN]' so the raw payment
+     * token is never written to the logs.
+     *
+     * @param array $data Request data to mask and format.
+     * @return string Readable, masked representation of the payload.
+     */
+    protected function maskPayloadForLogging(array $data)
+    {
+        $masked = $data;
+        if (array_key_exists('PTOK', $masked) && !empty($masked['PTOK'])) {
+            $masked['PTOK'] = '[HIDDEN]';
+        }
+
+        $parts = array();
+        foreach ($masked as $key => $value) {
+            $parts[] = "[{$key}]=" . ($value ?? '');
+        }
+
+        return implode(' ', $parts);
     }
 
     /**
