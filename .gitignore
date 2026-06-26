@@ -8,6 +8,7 @@ build/**
 #Composer
 vendor
 composer.phar
+composer.lock
 
 #phpDocs will remove from ignore once I am done with tests
 docs
