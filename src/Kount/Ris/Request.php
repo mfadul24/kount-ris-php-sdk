@@ -231,6 +231,12 @@ abstract class Kount_Ris_Request
     protected $accessToken = array();
 
     /**
+     * Optional cross-process cache for the Payments Fraud auth token.
+     * @var Kount_Cache_TokenCacheAdapter|null
+     */
+    private $tokenCache = null;
+
+    /**
      * Constructor.
      *
      * If no explicit configuration settings are provided we will attempt to
@@ -1056,6 +1062,41 @@ abstract class Kount_Ris_Request
     }
 
     /**
+     * Inject a PSR-6 or PSR-16 cache used to persist the Payments Fraud auth
+     * token across request instances and processes.
+     *
+     * @param \Psr\Cache\CacheItemPoolInterface|\Psr\SimpleCache\CacheInterface|Kount_Cache_TokenCacheAdapter $cache
+     *        A PSR-6 cache item pool, a PSR-16 simple cache, or an already
+     *        constructed Kount_Cache_TokenCacheAdapter.
+     * @return Kount_Ris_Request
+     * @throws InvalidArgumentException If $cache is not a supported cache type.
+     */
+    public function setTokenCache($cache): Kount_Ris_Request
+    {
+        if ($cache instanceof Kount_Cache_TokenCacheAdapter) {
+            $this->tokenCache = $cache;
+        } else {
+            $this->tokenCache = new Kount_Cache_TokenCacheAdapter($cache);
+        }
+        return $this;
+    }
+
+    /**
+     * Build a deterministic, PSR-6-safe cache key for the Payments Fraud auth
+     * token. The key is derived from the auth URL and client id; no secret is
+     * stored in plaintext. The result is composed only of hex characters and
+     * underscores, so it is safe for PSR-6 (which forbids {}()/\@:).
+     *
+     * @return string
+     */
+    protected function getTokenCacheKey(): string
+    {
+        $authUrl = $this->settings->getPaymentsFraudAuthUrl();
+        $clientId = $this->settings->getPaymentsFraudClientId();
+        return 'kount_ris_pf_token_' . hash('sha256', $authUrl . '|' . $clientId);
+    }
+
+    /**
      * Renew Payments Fraud Access Token
      * @return void
      * @throws Exception
@@ -1071,6 +1112,41 @@ abstract class Kount_Ris_Request
             return;
         }
 
+        // Try the injected cross-process cache before hitting the network.
+        if ($this->tokenCache !== null) {
+            $cached = $this->tokenCache->get($this->getTokenCacheKey());
+            if (
+                is_array($cached) &&
+                array_key_exists('expires_at', $cached) &&
+                $cached['expires_at'] > (new DateTime())->getTimestamp()
+            ) {
+                $this->accessToken = $cached;
+                return;
+            }
+        }
+
+        $token = $this->fetchAccessTokenFromServer();
+        if ($token === null) {
+            return;
+        }
+
+        $this->accessToken = $token;
+
+        if ($this->tokenCache !== null) {
+            $ttl = max(1, $token['expires_at'] - (new DateTime())->getTimestamp());
+            $this->tokenCache->set($this->getTokenCacheKey(), $token, $ttl);
+        }
+    }
+
+    /**
+     * Fetch a fresh Payments Fraud access token from the auth server.
+     *
+     * @return array|null The decoded token array with a computed 'expires_at'
+     *         entry (expires_in - 60 seconds), or null on error.
+     * @throws Exception
+     */
+    protected function fetchAccessTokenFromServer(): ?array
+    {
         $this->logger->debug("Refreshing Payments Fraud Access Token");
         $url = $this->settings->getPaymentsFraudAuthUrl();
         $apiKey = $this->settings->getPaymentsFraudApiKey();
@@ -1099,16 +1175,17 @@ abstract class Kount_Ris_Request
         curl_close($ch);
         if (!empty($curlErrNo) || !empty($curlError) || $httpCode >= 400) {
             $this->logger->error('An error occurred refreshing access token: ' . $output . ' -- ' . $curlError . ' errorNum: ' . $curlErrNo);
-            return;
+            return null;
         }
 
         $accessToken = json_decode($output, true);
 
         if (is_array($accessToken) && array_key_exists('expires_in', $accessToken)) {
             $accessToken['expires_at'] = (new DateTime())->getTimestamp() + $accessToken['expires_in'] - 60;
-            $this->accessToken = $accessToken;
-        } else {
-            $this->logger->error('An error occurred refreshing access token expiration could not be determined.');
+            return $accessToken;
         }
+
+        $this->logger->error('An error occurred refreshing access token expiration could not be determined.');
+        return null;
     }
 } // end Kount_Ris_Request

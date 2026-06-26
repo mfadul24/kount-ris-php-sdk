@@ -20,7 +20,9 @@
     "ext-curl": "*",
     "ext-json": "*",
     "ext-mbstring": "*",
-    "ext-xml": "*"
+    "ext-xml": "*",
+    "psr/cache": "^3.0",
+    "psr/simple-cache": "^3.0"
   },
   "require-dev": {
     "phpunit/phpunit": "^11.5.12",
