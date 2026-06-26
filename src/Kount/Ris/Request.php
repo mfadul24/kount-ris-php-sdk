@@ -231,6 +231,57 @@ abstract class Kount_Ris_Request
     protected $accessToken = array();
 
     /**
+     * HTTP transport used to perform requests. When null, a cURL transport is
+     * lazily created so behavior stays identical to the legacy implementation.
+     * @var Kount_Http_Transport|null
+     */
+    private $transport = null;
+
+    /**
+     * Inject a PSR-18 HTTP client (plus PSR-17 factories) to be used for all
+     * outbound HTTP calls instead of the default cURL transport.
+     *
+     * NOTE: TLS/mTLS (certificate) authentication must be configured on the
+     * injected client itself; PSR-18 does not carry cURL certificate options.
+     *
+     * @param \Psr\Http\Client\ClientInterface $client PSR-18 HTTP client.
+     * @param \Psr\Http\Message\RequestFactoryInterface $requestFactory PSR-17 request factory.
+     * @param \Psr\Http\Message\StreamFactoryInterface $streamFactory PSR-17 stream factory.
+     * @return Kount_Ris_Request
+     */
+    public function setHttpClient(
+        \Psr\Http\Client\ClientInterface $client,
+        \Psr\Http\Message\RequestFactoryInterface $requestFactory,
+        \Psr\Http\Message\StreamFactoryInterface $streamFactory
+    ): Kount_Ris_Request {
+        $this->transport = new Kount_Http_Psr18Transport($client, $requestFactory, $streamFactory);
+        return $this;
+    }
+
+    /**
+     * Inject a custom HTTP transport implementation for advanced use cases.
+     *
+     * @param Kount_Http_Transport $transport The transport to use.
+     * @return Kount_Ris_Request
+     */
+    public function setTransport(Kount_Http_Transport $transport): Kount_Ris_Request
+    {
+        $this->transport = $transport;
+        return $this;
+    }
+
+    /**
+     * Get the HTTP transport, lazily defaulting to cURL for backward
+     * compatibility when nothing has been injected.
+     *
+     * @return Kount_Http_Transport
+     */
+    protected function getTransport(): Kount_Http_Transport
+    {
+        return $this->transport ?? new Kount_Http_CurlTransport();
+    }
+
+    /**
      * Constructor.
      *
      * If no explicit configuration settings are provided we will attempt to
@@ -327,47 +378,48 @@ abstract class Kount_Ris_Request
         $startTimer = microtime(true);
 
         $this->logger->debug(__METHOD__ . " RIS endpoint URL: [{$this->url}]");
-        // Initialize CURL settings
-        $ch = curl_init();
+
+        // SSL/cert options. Always preserve today's behavior for the RIS POST:
+        // VERIFYPEER=1, VERIFYHOST=2, SSLVERSION=6, plus the cert options when
+        // certificate authentication is used.
+        $sslCertType = null;
+        $sslCert = null;
+        $sslKey = null;
+        $sslKeyPassword = null;
 
         if ($this->isMigrationModelEnabled) {
             $this->refreshPaymentsFraudAccessToken();
-            $headers = array("Authorization: {$this->accessToken['token_type']} {$this->accessToken['access_token']}");
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            $headers = array(
+                "Authorization" => "{$this->accessToken['token_type']} {$this->accessToken['access_token']}"
+            );
         } else {
             // try API key authentication first, then fall back to certificates
             // which are deprecated.
             if ($this->apiKey != "") {
                 $this->logger->debug("Setting API key header to RIS.");
                 $this->logger->debug("Setting merchant ID custom header to RIS.");
-                $headers = array("X-Kount-Api-Key: {$this->apiKey}", "X-Kount-Merc-Id: {$this->data['MERC']}");
-                curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+                $headers = array(
+                    "X-Kount-Api-Key" => $this->apiKey,
+                    "X-Kount-Merc-Id" => $this->data['MERC'],
+                );
             } else {
+                $headers = array();
                 // Set RIS certificate in CURL.
                 // If certificate is a .pk12 file then it must be converted to PEM format.
                 // The UNIX command line tool 'openssl' converts .pk12 to PEM.
                 // openssl pkcs12 -nocerts -in exported.p12 -out key.pem.
                 // openssl pkcs12 -clcerts -nokeys -in exported.p12 -out cert.pem
                 if (isset($this->certificate) && isset($this->key)) {
-                    curl_setopt($ch, CURLOPT_SSLCERTTYPE, "PEM");
-                    curl_setopt($ch, CURLOPT_SSLCERT, $this->certificate);
-                    curl_setopt($ch, CURLOPT_SSLKEY, $this->key);
-                    curl_setopt($ch, CURLOPT_SSLKEYPASSWD, $this->password);
+                    $sslCertType = "PEM";
+                    $sslCert = $this->certificate;
+                    $sslKey = $this->key;
+                    $sslKeyPassword = $this->password;
                 } else {
                     $this->logger->warn(__METHOD__ .
                         " No RIS client authentication certificate set.");
                 }
             }
         }
-        curl_setopt($ch, CURLOPT_URL, $this->url);
-        curl_setopt($ch, CURLOPT_HEADER, 0);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($ch, CURLOPT_TIMEOUT, $this->connectionTimeout);
-        curl_setopt($ch, CURLOPT_POST, 1);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 1);
-        curl_setopt($ch, CURLOPT_VERBOSE, 0);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
-        curl_setopt($ch, CURLOPT_SSLVERSION, 6);
 
         // Construct the POST
         $payload = array();
@@ -379,16 +431,30 @@ abstract class Kount_Ris_Request
                 'payment token hidden' : $value;
             $this->logger->debug(__METHOD__ . " [{$key}]={$value}");
         }
-        curl_setopt($ch, CURLOPT_POSTFIELDS, implode('&', $payload));
+
+        $httpRequest = new Kount_Http_Request(
+            'POST',
+            $this->url,
+            $headers,
+            implode('&', $payload),
+            $this->connectionTimeout,
+            $sslCertType,
+            $sslCert,
+            $sslKey,
+            $sslKeyPassword,
+            6,
+            1,
+            2
+        );
 
         $this->logger->debug(__METHOD__ . " Posting to RIS");
         // Call the RIS server and get the response
-        $output = curl_exec($ch);
+        $response = $this->getTransport()->send($httpRequest);
 
-        $curlErrNo = curl_errno($ch);
-        $curlError = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        $output = $response->body;
+        $curlErrNo = $response->errorCode;
+        $curlError = $response->errorMessage;
+        $httpCode = $response->statusCode;
 
         $time = microtime(true) - $startTimer;
         $timeInMs = round($time * 1000) . "ms";
@@ -1075,8 +1141,8 @@ abstract class Kount_Ris_Request
         $url = $this->settings->getPaymentsFraudAuthUrl();
         $apiKey = $this->settings->getPaymentsFraudApiKey();
         $headers = array(
-            "Authorization: Basic " . $apiKey,
-            "Content-Type: application/x-www-form-urlencoded"
+            "Authorization" => "Basic " . $apiKey,
+            "Content-Type" => "application/x-www-form-urlencoded"
         );
 
         $data = array(
@@ -1084,19 +1150,19 @@ abstract class Kount_Ris_Request
             "scope" => "k1_integration_api"
         );
 
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_HEADER, 0);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($ch, CURLOPT_TIMEOUT, self::CONNECTION_TIMEOUT);
-        curl_setopt($ch, CURLOPT_POST, 1);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
-        $output = curl_exec($ch);
-        $curlErrNo = curl_errno($ch);
-        $curlError = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        $httpRequest = new Kount_Http_Request(
+            'POST',
+            $url,
+            $headers,
+            http_build_query($data),
+            self::CONNECTION_TIMEOUT
+        );
+
+        $response = $this->getTransport()->send($httpRequest);
+        $output = $response->body;
+        $curlErrNo = $response->errorCode;
+        $curlError = $response->errorMessage;
+        $httpCode = $response->statusCode;
         if (!empty($curlErrNo) || !empty($curlError) || $httpCode >= 400) {
             $this->logger->error('An error occurred refreshing access token: ' . $output . ' -- ' . $curlError . ' errorNum: ' . $curlErrNo);
             return;
